@@ -1,75 +1,96 @@
+# Infrastructure configuration for AWS PHP Docker deployment
 provider "aws" {
+  region = "ap-south-1"
   profile = "terraform"
-  region  = "ap-south-1"
 }
 
-# Create VPC
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
+# GitHub repository information for cloning the application code
+variable "github_username" {
+  description = "GitHub username where the repository is hosted"
+  type        = string
+  default     = "prateekmeshram"
+}
+
+variable "key_name" {
+  description = "Name of the AWS key pair to use for SSH access"
+  type        = string
+  default     = "id_rsa"  # Default key name, change as needed  
+
+}
+
+variable "repo_name" {
+  description = "Name of the repository containing the Dockerfile"
+  type        = string
+  default     = "docker-deployment"
+}
+
+# Create a VPC to host our application
+resource "aws_vpc" "php_app_vpc" {
+  cidr_block = "10.0.0.0/16"
   enable_dns_hostnames = true
-  enable_dns_support   = true
-
+  enable_dns_support = true
   tags = {
-    Name = "docker-vpc"
+    Name = "php-app-vpc"
   }
-}
+} 
 
-# Create Internet Gateway
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = "docker-igw"
-  }
-}
-
-# Create Public Subnet
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.subnet_cidr
-  availability_zone       = "${var.region}a"
+# Create a public subnet for our EC2 instance
+resource "aws_subnet" "php_app_public_subnet" {
+  vpc_id     = aws_vpc.php_app_vpc.id
+  cidr_block = "10.0.0.0/24"
+  availability_zone = "ap-south-1a"
   map_public_ip_on_launch = true
-
   tags = {
-    Name = "docker-public-subnet"
+    Name = "php-app-public-subnet"
   }
 }
 
-# Create Route Table
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
+# Create Internet Gateway to allow internet access for our VPC
+resource "aws_internet_gateway" "php_app_igw" {
+  vpc_id = aws_vpc.php_app_vpc.id
+  tags = {
+    Name = "php-app-igw"
+  }
+}
+
+# Create Route Table to direct traffic through the Internet Gateway
+resource "aws_route_table" "php_app_rt" {
+  vpc_id = aws_vpc.php_app_vpc.id
 
   route {
     cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
+    gateway_id = aws_internet_gateway.php_app_igw.id
   }
 
   tags = {
-    Name = "docker-public-rt"
+    Name = "php-app-rt"
   }
 }
 
-# Associate Route Table with Subnet
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
+# Associate the Route Table with our public subnet
+resource "aws_route_table_association" "php_app_rta" {
+  subnet_id      = aws_subnet.php_app_public_subnet.id
+  route_table_id = aws_route_table.php_app_rt.id
 }
 
-resource "aws_security_group" "httpd_sg" {
-  name_prefix = "httpd-sg"
-  description = "Security group for HTTP and SSH access"
-  vpc_id      = aws_vpc.main.id
+# Create Security Group to allow HTTP and SSH access
+resource "aws_security_group" "php_app_sg" {
+  name        = "php-app-sg"
+  description = "Allow SSH and HTTP inbound traffic"
+  vpc_id      = aws_vpc.php_app_vpc.id
 
   ingress {
-    from_port   = 80
-    to_port     = 80
+    description = "SSH from anywhere"
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
-    from_port   = 22
-    to_port     = 22
+    description = "HTTP from anywhere"
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -80,91 +101,58 @@ resource "aws_security_group" "httpd_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = {
+    Name = "allow-web"
+  }
 }
 
-resource "aws_instance" "httpd_server" {
-  ami           = var.ami_id
-  instance_type = var.instance_type
-  subnet_id     = aws_subnet.public.id
-  key_name      = var.key_name
-  vpc_security_group_ids = [aws_security_group.httpd_sg.id]
+# Create EC2 instance to host our Docker container with PHP application
+resource "aws_instance" "php_app_server" {
+  ami                    = "ami-03f4878755434977f"  # Amazon Linux 2023 AMI in ap-south-1
+  instance_type          = "t2.micro"
+  key_name              = var.key_name     # Use the key pair variable
+  vpc_security_group_ids = [aws_security_group.php_app_sg.id]
+  subnet_id             = aws_subnet.php_app_public_subnet.id
+  associate_public_ip_address = true
+  
+  tags = {
+    Name = "web-server"
+  }
 
   user_data = <<-EOF
               #!/bin/bash
-              exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-              echo "Starting user data script execution..."
-              yum update -y
-              echo "Installing Docker..."
-              amazon-linux-extras install docker -y
-              echo "Starting Docker service..."
-              service docker start
-              usermod -a -G docker ec2-user
-              mkdir -p /home/ec2-user/docker
-              cat > /home/ec2-user/docker/index.html << 'HTMLEOF'
-              <!DOCTYPE html>
-              <html lang="en">
-              <head>
-                  <meta charset="UTF-8">
-                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                  <title>Welcome to My Docker Website</title>
-                  <style>
-                      body {
-                          font-family: Arial, sans-serif;
-                          line-height: 1.6;
-                          margin: 0;
-                          padding: 20px;
-                          background-color: #f0f2f5;
-                      }
-                      .container {
-                          max-width: 800px;
-                          margin: 0 auto;
-                          background-color: white;
-                          padding: 20px;
-                          border-radius: 8px;
-                          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-                      }
-                      h1 {
-                          color: #1a73e8;
-                          text-align: center;
-                      }
-                      p {
-                          color: #333;
-                      }
-                  </style>
-              </head>
-              <body>
-                  <div class="container">
-                      <h1>Welcome to My Docker Website!</h1>
-                      <p>This is a custom web page being served from an Apache container running on AWS EC2.</p>
-                      <p>Key features of this setup:</p>
-                      <ul>
-                          <li>Running on Amazon Linux 2</li>
-                          <li>Docker container with Apache</li>
-                          <li>Custom HTML content</li>
-                          <li>Terraform-managed infrastructure</li>
-                      </ul>
-                      <p>Thanks for visiting!</p>
-                  </div>
-              </body>
-              </html>
-              HTMLEOF
+              # Update system
+              apt-get update -y
               
-              cat > /home/ec2-user/docker/Dockerfile << 'DOCKEREOF'
-              FROM httpd:2.4
-              COPY index.html /usr/local/apache2/htdocs/
-              DOCKEREOF
+              # Install Docker
+              apt-get install -y docker.io
+              systemctl start docker
+              systemctl enable docker
               
-              cd /home/ec2-user/docker
-              echo "Building Docker image..."
-              docker build -t my-apache-site .
-              echo "Running Docker container..."
-              docker run -d -p 80:80 my-apache-site
-              echo "Checking Docker container status..."
-              docker ps
-              echo "User data script completed."
+              # Install Git
+              yum install -y git
+              
+              # Clone the repository
+              git clone https://github.com/${var.github_username}/${var.repo_name}.git /app
+              cd /app
+              
+              # Build and run Docker container
+              docker build -t php-app .
+              docker run -d -p 80:80 php-app
               EOF
 
-  tags = {
-    Name = "httpd-docker-server"
-  }
+  depends_on = [aws_security_group.php_app_sg]  # Ensure security group is created before instance
+} 
+
+# Output the public IP of the EC2 instance
+output "instance_public_ip" {
+  description = "Public IP of the PHP application server"
+  value       = aws_instance.php_app_server.public_ip
 }
+
+# Create a key pair for SSH access
+resource "aws_key_pair" "php_app_key" {
+  key_name   = var.key_name
+  public_key = file("~/.ssh/${var.key_name}.pub")  # Ensure the public key file exists
+} 
