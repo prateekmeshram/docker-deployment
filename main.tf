@@ -109,7 +109,7 @@ resource "aws_security_group" "php_app_sg" {
 
 # Create EC2 instance to host our Docker container with PHP application
 resource "aws_instance" "php_app_server" {
-  ami                    = "ami-03f4878755434977f"  # Amazon Linux 2023 AMI in ap-south-1
+  ami                    = "ami-0f918f7e67a3323f0"  # Ubuntu 24 AMI in ap-south-1
   instance_type          = "t2.micro"
   key_name              = var.key_name     # Use the key pair variable
   vpc_security_group_ids = [aws_security_group.php_app_sg.id]
@@ -122,24 +122,50 @@ resource "aws_instance" "php_app_server" {
 
   user_data = <<-EOF
               #!/bin/bash
+              
+              # Enable logging of user data script
+              exec > >(tee /var/log/user-data.log) 2>&1
+              
+              echo "[$(date)] Starting user data script execution..."
+              
               # Update system
-              apt-get update -y
+              echo "[$(date)] Updating system packages..."
+              sudo apt-get update -y
               
               # Install Docker
-              apt-get install -y docker.io
-              systemctl start docker
-              systemctl enable docker
+              echo "[$(date)] Installing Docker and Git..."
+              sudo apt-get install -y docker.io git
               
-              # Install Git
-              yum install -y git
+              # Start and enable Docker
+              echo "[$(date)] Starting Docker service..."
+              sudo systemctl start docker
+              sudo systemctl enable docker
+              
+              # Add ubuntu user to docker group
+              echo "[$(date)] Adding ubuntu user to docker group..."
+              sudo usermod -aG docker ubuntu
               
               # Clone the repository
-              git clone https://github.com/${var.github_username}/${var.repo_name}.git /app
-              cd /app
+              echo "[$(date)] Cloning repository..."
+              sudo rm -rf /app
+              sudo git clone https://github.com/prateekmeshram/docker-deployment.git /app
+              
+              echo "[$(date)] Changing to app directory..."
+              cd /app || exit 1
               
               # Build and run Docker container
-              docker build -t php-app .
-              docker run -d -p 80:80 php-app
+              echo "[$(date)] Building Docker image..."
+              sudo docker build -t php-app . || exit 1
+              
+              echo "[$(date)] Running Docker container..."
+              # Stop any existing container
+              sudo docker stop $(sudo docker ps -q --filter ancestor=php-app) 2>/dev/null || true
+              sudo docker rm $(sudo docker ps -aq --filter ancestor=php-app) 2>/dev/null || true
+              
+              # Run new container
+              sudo docker run -d -p 80:80 php-app
+              
+              echo "[$(date)] User data script completed!"
               EOF
 
   depends_on = [aws_security_group.php_app_sg]  # Ensure security group is created before instance
