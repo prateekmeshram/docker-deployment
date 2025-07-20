@@ -157,9 +157,7 @@ resource "aws_key_pair" "app_key" {
 
   lifecycle {
     create_before_destroy = true
-    # This prevents recreation of the key pair if it already exists
-    # and only updates if the public key content changes
-    prevent_destroy = true
+    # Only creates new key pair if the public key content changes
   }
 
   # Add tags to help identify the key pair
